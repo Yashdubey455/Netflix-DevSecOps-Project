@@ -1,0 +1,135 @@
+pipeline {
+   agent any
+    tools {
+        jdk 'jdk-17'
+        nodejs 'node16'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+        AWS_REGION     = 'us-east-2'
+        AWS_ACCOUNT_ID = '200385945243'
+        ECR_REPO       = 'netflixx'
+        IMAGE_TAG      = 'latest'
+        ECR_URI        = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps { cleanWs() }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/Yashdubey455/Netflix-DevSecOps-Project.git'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh """
+                    $SCANNER_HOME/bin/sonar-scanner \
+                    -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false,
+                                       credentialsId: 'Sonar-token'
+                }
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps { sh "npm install" }
+        }
+
+        stage('Static Security Scans') {
+            parallel {
+
+                stage('OWASP FS Scan') {
+                    steps {
+                        // Using Jenkins Dependency-Check plugin
+                        dependencyCheck additionalArguments: '--disableYarnAudit --disableNodeAudit',
+                                       odcInstallation: 'DP-Check'
+                        dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    }
+                }
+
+                stage('Trivy FS Scan') {
+                    steps { sh 'trivy fs . --exit-code 0' }
+                }
+            }
+        }
+
+        stage('Docker Build & Push to AWS ECR') {
+            steps {
+                script {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                                      credentialsId: 'aws-creds']]) {
+
+                        sh """
+                        aws ecr get-login-password --region ${AWS_REGION} \
+                        | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                        docker build \
+                        --build-arg TMDB_V3_API_KEY=8be8d845a9a6b565b3c96505101e811d \
+                        -t ${ECR_REPO}:${IMAGE_TAG} .
+
+                        docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_URI}:${IMAGE_TAG}
+
+                        docker push ${ECR_URI}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Trivy Image Scan (ECR)') {
+            steps {
+                sh 'trivy image ${ECR_URI}:${IMAGE_TAG} --severity HIGH,CRITICAL --exit-code 0 > trivyimage.txt'
+            }
+        }
+    }
+
+    post {
+
+        success {
+            emailext(
+                subject: "✅ SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
+                body: """
+                <h2>Pipeline Succeeded 🎉</h2>
+                <p><b>Job:</b> ${JOB_NAME}</p>
+                <p><b>Build Number:</b> ${BUILD_NUMBER}</p>
+                <p><b>Status:</b> SUCCESS</p>
+                <p><b>Build URL:</b>
+                <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                """,
+                to: "Yashdubey455@gmail.com"
+            )
+        }
+
+        failure {
+            emailext(
+                subject: "❌ FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
+                body: """
+                <h2>Pipeline Failed 🚨</h2>
+                <p><b>Job:</b> ${JOB_NAME}</p>
+                <p><b>Build Number:</b> ${BUILD_NUMBER}</p>
+                <p><b>Status:</b> FAILED</p>
+                <p><b>Check Logs:</b>
+                <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                """,
+                to: "Yashdubey455@gmail.com"
+            )
+        }
+    }
+}

@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: netflix-app
+  namespace: netflix
   labels:
     app: netflix-app
 spec:
